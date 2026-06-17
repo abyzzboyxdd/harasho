@@ -3,57 +3,61 @@
 # Прерывать выполнение при ошибках
 set -e
 
-echo "========================================================"
-echo " 1. ПОДГОТОВКА СИСТЕМЫ, РЕПОЗИТОРИЕВ И ANSIBLE          "
-echo "========================================================"
-yum update -y
-yum install -y epel-release yum-utils wget curl git unzip nano
+echo "=== 1. ПЕРЕКЛЮЧЕНИЕ ЗЕРКАЛ И ОБНОВЛЕНИЕ СИСТЕМЫ ==="
+# Переводим базовые репозитории на архив Vault (CentOS 7 End of Life)
+sed -i s/mirror.centos.org/vault.centos.org/g /etc/yum.repos.d/CentOS-*.repo
+sed -i s/^#.*baseurl=http/baseurl=http/g /etc/yum.repos.d/CentOS-*.repo
+sed -i s/^mirrorlist=http/#mirrorlist=http/g /etc/yum.repos.d/CentOS-*.repo
 
+yum clean all
+yum makecache
+yum install -y epel-release yum-utils wget curl git unzip nano ca-certificates
+update-ca-trust force-enable
+
+echo "=== 2. УСТАНОВКА РЕПОЗИТОРИЕВ И ПАКЕТОВ (ANSIBLE, PHP 8.1, NODE 16) ==="
 # Установка Ansible
 yum install -y ansible
 
-# Подключение Remi для PHP 8.1 (нужно для локальных Стеков 8-10)
-yum install -y https://rpms.remirepo.net/enterprise/remi-release-7.rpm
-yum-config-manager --enable remi-php81
+# Настройка Remi PHP 8.1
+yum install -y http://rpms.remirepo.net/enterprise/remi-release-7.rpm || true
+if [ -f /etc/yum.repos.d/remi-php81.repo ]; then
+    sed -i '/\[remi-php81\]/,/^\[/ s/enabled=0/enabled=1/' /etc/yum.repos.d/remi-php81.repo
+else
+    yum-config-manager --enable remi-php81 || true
+fi
+
+# Установка PHP и модулей
 yum install -y php php-cli php-fpm php-mysqlnd php-zip php-devel php-gd php-mbstring php-curl php-xml php-bcmath php-json
 
-# Установка Node.js 18 и Python3 для локальных стеков
-curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-yum install -y nodejs python3 python3-pip python3-devel
+# Установка Node.js 16 (последняя рабочая версия для glibc на CentOS 7)
+rm -f /etc/yum.repos.d/nodesource*.repo
+curl -sL https://rpm.nodesource.com/setup_16.x | bash -
+yum install -y nodejs
 
-# Установка Composer
+# Установка Composer и подготовка папок
 curl -sS https://getcomposer.org/installer | php
-mv composer.phar /usr/local/bin/composer
-chmod +x /usr/local/bin/composer
+mv composer.phar /usr/local/bin/composer && chmod +x /usr/local/bin/composer
 
-# Создаем рабочие директории
 mkdir -p /opt/ansible_stacks
 mkdir -p /opt/stacks
 mkdir -p /mnt/flashmemory
 
-# Создаем тестовый index.php для Стека №6 (имитация flashmemory)
-echo "<?php echo '<h1>Welcome to Landing Page from Flashmemory!</h1>'; ?>" > /mnt/flashmemory/index.php
+# Имитация файлов для Стека 6
+echo "<?php echo '<h1>Landing Page from Flashmemory (Stack 6)</h1>'; ?>" > /mnt/flashmemory/index.php
 
-
-echo "========================================================"
-echo " 2. СОЗДАНИЕ И ЗАПУСК PLAYBOOK ANSIBLE (СТЕКИ 1-7)      "
-echo "========================================================"
-
-# Пишем Ansible Playbook в файл
+echo "=== 3. ЗАПУСК ANSIBLE PLAYBOOK (СТЕКИ 1-7) ==="
 cat << 'EOF' > /opt/ansible_stacks/playbook.yml
 ---
-- name: Deployment of Stacks 1-7 over Docker
+- name: Deploy Docker Stacks 1-7
   hosts: localhost
   connection: local
   tasks:
-    - name: Install Docker dependencies
+    - name: Install Docker system packages
       yum:
-        name:
-          - device-mapper-persistent-data
-          - lvm2
+        name: [device-mapper-persistent-data, lvm2]
         state: present
 
-    - name: Add Docker repo
+    - name: Add Docker stable repository
       get_url:
         url: https://download.docker.com/linux/centos/docker-ce.repo
         dest: /etc/yum.repos.d/docker-ce.repo
@@ -63,73 +67,69 @@ cat << 'EOF' > /opt/ansible_stacks/playbook.yml
         name: docker-ce
         state: present
 
-    - name: Start and enable Docker
+    - name: Ensure Docker service is running
       service:
         name: docker
         state: started
         enabled: yes
 
-    # Стек 1: Docker + Apache2 + HTML(HELLO WORLD) -> Port 8001
-    - name: Stack 1 - Apache + HTML (Hello World)
+    # Стек 1: Apache + HTML -> Port 8001
+    - name: Stack 1 - Apache HTML Hello World
       shell: |
-        docker run -d --name stack1_html -p 8001:80 --restart unless-stopped \
-        -v /opt/ansible_stacks/s1:/public-html php:8.1-apache bash -c "echo '<h1>HELLO WORLD</h1>' > /var/www/html/index.html && apache2-foreground"
+        docker run -d --name s1_html -p 8001:80 --restart unless-stopped \
+        php:8.1-apache bash -c "echo '<h1>HELLO WORLD</h1>' > /var/www/html/index.html && apache2-foreground"
       ignore_errors: yes
 
-    # Стек 2: Docker + Apache2 + PHP + phpinfo() -> Port 8002
-    - name: Stack 2 - Apache + PHP (phpinfo)
+    # Стек 2: Apache + PHP Info -> Port 8002
+    - name: Stack 2 - Apache PHP phpinfo
       shell: |
-        docker run -d --name stack2_phpinfo -p 8002:80 --restart unless-stopped \
-        -v /opt/ansible_stacks/s2:/var/www/html php:8.1-apache bash -c "echo '<?php phpinfo(); ?>' > /var/www/html/index.php && apache2-foreground"
+        docker run -d --name s2_phpinfo -p 8002:80 --restart unless-stopped \
+        php:8.1-apache bash -c "echo '<?php phpinfo(); ?>' > /var/www/html/index.php && apache2-foreground"
       ignore_errors: yes
 
-    # Стек 3: Docker + Apache2 + PHP + Wordpress -> Port 8003
-    - name: Stack 3 - Launch MySQL Container for Wordpress
-      shell: docker run -d --name wp_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=wp -d mysql:5.7
+    # Стек 3: Apache + PHP + Wordpress (внутри Ansible) -> Port 8003
+    - name: Stack 3 - MySQL for Wordpress
+      shell: docker run -d --name wp_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=wp mysql:5.7
       ignore_errors: yes
 
     - name: Stack 3 - Wordpress Container
-      shell: docker run -d --name stack3_wordpress --link wp_db:mysql -p 8003:80 -e WORDPRESS_DB_PASSWORD=secret --restart unless-stopped wordpress:latest
+      shell: docker run -d --name s3_wordpress --link wp_db:mysql -p 8003:80 -e WORDPRESS_DB_PASSWORD=secret --restart unless-stopped wordpress:latest
       ignore_errors: yes
 
-    # Стек 4: Docker + Grafana -> Port 3004 (чтобы не занять 3000 от React)
-    - name: Stack 4 - Grafana
-      shell: docker run -d --name stack4_grafana -p 3004:3000 --restart unless-stopped grafana/grafana:latest
+    # Стек 4: Grafana -> Port 8004
+    - name: Stack 4 - Grafana Container
+      shell: docker run -d --name s4_grafana -p 8004:3000 --restart unless-stopped grafana/grafana:latest
       ignore_errors: yes
 
-    # Стек 5: Docker + Apache2 + PHP + osTicket -> Port 8005
-    - name: Stack 5 - Launch MariaDB for osTicket
-      shell: docker run -d --name osticket_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=osticket -d mariadb:10.5
+    # Стек 5: osTicket -> Port 8005
+    - name: Stack 5 - MariaDB for osTicket
+      shell: docker run -d --name ost_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=osticket mariadb:10.5
       ignore_errors: yes
 
     - name: Stack 5 - osTicket Container
-      shell: docker run -d --name stack5_osticket --link osticket_db:mysql -p 8005:80 --restart unless-stopped osticket/osticket:latest
+      shell: docker run -d --name s5_osticket --link ost_db:mysql -p 8005:80 --restart unless-stopped osticket/osticket:latest
       ignore_errors: yes
 
-    # Стек 6: Docker + Apache2 + PHP + Landing (на flashmemory) -> Port 8006
-    - name: Stack 6 - Landing from flashmemory
-      shell: docker run -d --name stack6_landing -p 8006:80 -v /mnt/flashmemory:/var/www/html --restart unless-stopped php:8.1-apache
+    # Стек 6: Landing (flashmemory) -> Port 8006
+    - name: Stack 6 - Landing from flashmemory volume
+      shell: docker run -d --name s6_landing -p 8006:80 -v /mnt/flashmemory:/var/www/html --restart unless-stopped php:8.1-apache
       ignore_errors: yes
 
-    # Стек 7: Docker + Apache2 + PHP + Joomla -> Port 8007
-    - name: Stack 7 - Launch MySQL for Joomla
-      shell: docker run -d --name joomla_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=joomla -d mysql:5.7
+    # Стек 7: Joomla -> Port 8007
+    - name: Stack 7 - MySQL for Joomla
+      shell: docker run -d --name joomla_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=joomla mysql:5.7
       ignore_errors: yes
 
     - name: Stack 7 - Joomla Container
-      shell: docker run -d --name stack7_joomla --link joomla_db:mysql -p 8007:80 --restart unless-stopped joomla:latest
+      shell: docker run -d --name s7_joomla --link joomla_db:mysql -p 8007:80 --restart unless-stopped joomla:latest
       ignore_errors: yes
 EOF
 
-# Запуск Ansible Playbook локально
 ansible-playbook /opt/ansible_stacks/playbook.yml
 
+echo "=== 4. РАЗВЕРТЫВАНИЕ НА ТЕКСТОВОМ ЛИСТКЕ (СТЕКИ 8-10 + JS) ==="
 
-echo "========================================================"
-echo " 3. РАЗВЕРТЫВАНИЕ НА ТЕКСТОВОМ ЛИСТКЕ (СТЕКИ 8-10)     "
-echo "========================================================"
-
-# --- СТЭК 8: DJANGO ---
+# Стек 8: DJANGO (Порт 8001 по листку стола №1)
 echo "--- Развертывание: DJANGO ---"
 mkdir -p /opt/stacks/django && cd /opt/stacks/django
 python3 -m venv env
@@ -140,65 +140,53 @@ cd testsite
 python manage.py migrate
 DJANGO_SUPERUSER_PASSWORD=adminpassword DJANGO_SUPERUSER_USERNAME=admin DJANGO_SUPERUSER_EMAIL=admin@example.com python manage.py createsuperuser --noinput || true
 sed -i "s/ALLOWED_HOSTS = \[\]/ALLOWED_HOSTS = ['*']/g" testsite/settings.py
-nohup python manage.py runserver 0.0.0.0:8000 > django.log 2>&1 &
+nohup python manage.py runserver 0.0.0.0:8001 > django.log 2>&1 &
 deactivate
 
-# --- СТЭК 9: LARAVEL ---
+# Стек 9: LARAVEL (Порт 8081 по листку стола №1)
 echo "--- Развертывание: LARAVEL ---"
 cd /opt/stacks
+rm -rf example
 composer create-project laravel/laravel example --no-interaction
 cd example
-nohup php artisan serve --host=0.0.0.0 --port=8080 > laravel.log 2>&1 &
+nohup php artisan serve --host=0.0.0.0 --port=8081 > laravel.log 2>&1 &
 
-# --- СТЭК 10: YII ---
+# Стек 10: YII (Порт 8881 по листку стола №1)
 echo "--- Развертывание: YII ---"
 cd /opt/stacks
+rm -rf basic
 composer create-project --prefer-dist yiisoft/yii2-app-basic basic --no-interaction
 cd basic
-nohup php yii serve 0.0.0.0 --port=8880 > yii.log 2>&1 &
+nohup php yii serve 0.0.0.0 --port=8881 > yii.log 2>&1 &
 
-# --- ДОПОЛНИТЕЛЬНЫЙ СТЭК: REACT ---
+# ДОПОЛНИТЕЛЬНО: REACT (Порт 3001 по листку стола №1)
 echo "--- Развертывание: REACT ---"
 cd /opt/stacks
+rm -rf demo-app
 npx create-react-app demo-app --use-npm
 cd demo-app
-nohup env PORT=3000 npm start > react.log 2>&1 &
+nohup env PORT=3001 npm start > react.log 2>&1 &
 
-# --- ДОПОЛНИТЕЛЬНЫЙ СТЭК: VUE JS ---
+# ДОПОЛНИТЕЛЬНО: VUE JS (Порт 5171 по листку стола №1)
 echo "--- Развертывание: VUE JS ---"
 cd /opt/stacks
+rm -rf vue-project
 npx create-vue vue-project --default
 cd vue-project
 npm install
-nohup npm run dev -- --host 0.0.0.0 --port 5170 > vue.log 2>&1 &
+nohup npm run dev -- --host 0.0.0.0 --port 5171 > vue.log 2>&1 &
 
-
-echo "========================================================"
-echo " 4. НАСТРОЙКА НАШЕГО FIREWALLД                          "
-echo "========================================================"
+echo "=== 5. НАСТРОЙКА FIREWALLD ==="
 if systemctl is-active --quiet firewalld; then
-    # Порты для Docker-стеков (1-7)
-    firewall-cmd --permanent --add-port=8001/tcp # Стек 1 (HTML)
-    firewall-cmd --permanent --add-port=8002/tcp # Стек 2 (PHP Info)
-    firewall-cmd --permanent --add-port=8003/tcp # Стек 3 (Wordpress)
-    firewall-cmd --permanent --add-port=3004/tcp # Стек 4 (Grafana)
-    firewall-cmd --permanent --add-port=8005/tcp # Стек 5 (osTicket)
-    firewall-cmd --permanent --add-port=8006/tcp # Стек 6 (Landing)
-    firewall-cmd --permanent --add-port=8007/tcp # Стек 7 (Joomla)
-    
-    # Порты для локальных стеков (8-10)
-    firewall-cmd --permanent --add-port=8000/tcp # Django
-    firewall-cmd --permanent --add-port=8080/tcp # Laravel
-    firewall-cmd --permanent --add-port=8880/tcp # Yii
-    firewall-cmd --permanent --add-port=3000/tcp # React
-    firewall-cmd --permanent --add-port=5170/tcp # Vue JS
-    
+    # Открываем порты для всех запущенных веб-служб (Стол 1)
+    firewall-cmd --permanent --add-port={8001,8002,8003,8004,8005,8006,8007}/tcp
+    firewall-cmd --permanent --add-port={8081,8881,3001,5171}/tcp
     firewall-cmd --reload
-    echo "Все порты (с 1 по 10 стек) открыты в Firewalld!"
+    echo "Все порты успешно открыты в брандмауэре!"
 else
-    echo "Firewalld отключен, порты открыты по умолчанию."
+    echo "Firewalld выключен, порты открыты по умолчанию."
 fi
 
 echo "========================================================"
-echo "   ВСЕ СТЕКИ УСПЕШНО НАСТРОЕНЫ И ЗАПУЩЕНЫ!              "
+echo "   ВСЕ 10 СТЕКОВ УСПЕШНО НАСТРОЕНЫ И СВЯЗАНЫ ПО ПОРТАМ! "
 echo "========================================================"
