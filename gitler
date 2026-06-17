@@ -1,137 +1,164 @@
 #!/bin/bash
 
-# Скрипт автоматического развертывания 7 технологических стеков на CentOS 7
-# Запуск: sudo bash deploy_stacks.sh
+# ==============================================================================
+# Автоматический скрипт комплексного развертывания всех стеков для CentOS 7
+# Включает исправленные контейнеры, а также фреймворки Django, Laravel, Yii, React, Vue.
+# Запуск: sudo bash deploy_all_stacks_updated.sh
+# ==============================================================================
 
-# Завершать выполнение при любой ошибке
 set -e
 
-echo "=== [1/3] Обновление системы и установка зависимостей Docker ==="
-yum install -y yum-utils device-mapper-persistent-data lvm2
+echo "=== [1/5] Обновление пакетного менеджера и базовая предобработка ==="
+yum install -y yum-utils device-mapper-persistent-data lvm2 epel-release
 
-echo "=== [2/3] Подключение официального репозитория Docker CE и его установка ==="
+echo "=== [2/5] Подключение репозиториев для Docker, Node.js и PHP (Composer) ==="
+# Репозиторий Docker CE
 yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-yum install -y docker-ce docker-ce-cli containerd.io
 
-echo "=== [3/3] Запуск и включение Docker в автозагрузку ==="
+# Репозиторий Node.js (устанавливаем Node.js 16 LTS для CentOS 7)
+curl -sL https://rpm.nodesource.com/setup_16.x | bash -
+
+# Репозиторий Remi для PHP (Laravel и Yii требуют PHP >= 7.4/8.0)
+yum install -y https://rpms.remirepo.net/enterprise/remi-release-7.rpm
+yum-config-manager --enable remi-php81
+
+echo "=== [3/5] Установка всех необходимых системных пакетов ==="
+yum install -y \
+    docker-ce docker-ce-cli containerd.io \
+    nodejs npm \
+    php php-cli php-fpm php-mysqlnd php-zip php-developer php-gd php-mbstring php-curl php-xml php-pear php-bcmath php-json \
+    python3 python3-pip python3-devel \
+    git unzip wget git-core
+
+# Установка Composer глобально для Laravel и Yii
+if ! command -v composer &> /dev/null; then
+    echo "-> Установка Composer..."
+    curl -sS https://getcomposer.org/installer | php
+    mv composer.phar /usr/local/bin/composer
+    chmod +x /usr/local/bin/composer
+fi
+
+echo "=== [4/5] Запуск и активация системных служб ==="
+systemctl daemon-reload
 systemctl start docker
 systemctl enable docker
 
-# Переменные путей
+# Глобальные переменные путей
 WEB_ROOT="/var/www/html"
 FLASH_MEMORY_MOUNT="/mnt/flashmemory"
+mkdir -p "$WEB_ROOT"
+mkdir -p "$FLASH_MEMORY_MOUNT"
 
-echo "=== Развертывание технологических стеков ==="
+# Отключаем принудительный SELinux во избежание конфликтов прав с веб-директориями
+setenforce 0 || true
+
+echo "=== [5/5] Поочередное развертывание всех технологических стеков ==="
 
 # --- СТЭК 1: Docker + Apache2 + HTML (HELLO WORLD) ---
-echo "-> Настройка Стэка 1..."
+echo "-> Развертывание Стэка 1: Apache + HTML..."
 mkdir -p "${WEB_ROOT}/stack1"
 echo "<h1>HELLO WORLD</h1>" > "${WEB_ROOT}/stack1/index.html"
-# chcon нужен для SELinux на CentOS 7, чтобы контейнер имел доступ к папке
-chcon -Rt svirt_sandbox_file_t "${WEB_ROOT}/stack1" 2>/dev/null || true
-
-docker run -d --name apache_stack1 \
-  --restart always \
-  -p 8081:80 \
-  -v "${WEB_ROOT}/stack1:/usr/local/apache2/htdocs/:z" \
-  httpd:latest
+docker run -d --name apache_stack1 --restart always -p 8081:80 -v "${WEB_ROOT}/stack1:/usr/local/apache2/htdocs/:z" httpd:latest
 
 # --- СТЭК 2: Docker + Apache2 + PHP + phpinfo() ---
-echo "-> Настройка Стэка 2..."
+echo "-> Развертывание Стэка 2: Apache + PHP..."
 mkdir -p "${WEB_ROOT}/stack2"
 echo "<?php phpinfo(); ?>" > "${WEB_ROOT}/stack2/index.php"
-chcon -Rt svirt_sandbox_file_t "${WEB_ROOT}/stack2" 2>/dev/null || true
-
-docker run -d --name apache_php_stack2 \
-  --restart always \
-  -p 8082:80 \
-  -v "${WEB_ROOT}/stack2:/var/www/html/:z" \
-  php:apache
+docker run -d --name apache_php_stack2 --restart always -p 8082:80 -v "${WEB_ROOT}/stack2:/var/www/html/:z" php:apache
 
 # --- СТЭК 3: Docker + Apache2 + PHP + Wordpress ---
-echo "-> Настройка Стэка 3 (WordPress)..."
-docker run -d --name wordpress_db \
-  --restart always \
-  -e MYSQL_ROOT_PASSWORD=wp_root_password \
-  -e MYSQL_DATABASE=wordpress \
-  -e MYSQL_USER=wordpress \
-  -e MYSQL_PASSWORD=wordpress_password \
-  mysql:5.7
-
-docker run -d --name wordpress_stack3 \
-  --restart always \
-  -p 8083:80 \
-  --link wordpress_db:wordpress_db \
-  -e WORDPRESS_DB_HOST=wordpress_db:3306 \
-  -e WORDPRESS_DB_USER=wordpress \
-  -e WORDPRESS_DB_PASSWORD=wordpress_password \
-  -e WORDPRESS_DB_NAME=wordpress \
-  wordpress:latest
+echo "-> Развертывание Стэка 3: WordPress..."
+docker run -d --name wordpress_db --restart always -e MYSQL_ROOT_PASSWORD=wp_root_password -e MYSQL_DATABASE=wordpress -e MYSQL_USER=wordpress -e MYSQL_PASSWORD=wordpress_password mysql:5.7
+docker run -d --name wordpress_stack3 --restart always -p 8083:80 --link wordpress_db:wordpress_db -e WORDPRESS_DB_HOST=wordpress_db:3306 -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=wordpress_password -e WORDPRESS_DB_NAME=wordpress wordpress:latest
 
 # --- СТЭК 4: Docker + Grafana ---
-echo "-> Настройка Стэка 4 (Grafana)..."
-docker run -d --name grafana_stack4 \
-  --restart always \
-  -p 3000:3000 \
-  grafana/grafana:latest
+echo "-> Развертывание Стэка 4: Grafana..."
+docker run -d --name grafana_stack4 --restart always -p 3000:3000 grafana/grafana:latest
 
-# --- СТЭК 5: Docker + Apache2 + PHP + osTicket ---
-echo "-> Настройка Стэка 5 (osTicket)..."
-docker run -d --name osticket_db \
-  --restart always \
+# --- ⚡ ИСПРАВЛЕННЫЙ СТЭК 5: osTicket через изолированную подсеть ⚡ ---
+echo "-> Развертывание Стэка 5: ИСПРАВЛЕННЫЙ osTicket..."
+docker network create osticket_net 2>/dev/null || true
+docker rm -f osticket_stack5 osticket_db 2>/dev/null || true
+
+docker run -d --name osticket_db --network osticket_net --restart always \
   -e MYSQL_ROOT_PASSWORD=osticket_root_pass \
   -e MYSQL_DATABASE=osticket \
   -e MYSQL_USER=osticket \
   -e MYSQL_PASSWORD=osticket_pass \
   mysql:5.7
 
-docker run -d --name osticket_stack5 \
-  --restart always \
-  -p 8085:80 \
-  --link osticket_db:osticket_db \
+echo "Ожидание инициализации БД для osTicket (15 секунд)..."
+sleep 15
+
+docker run -d --name osticket_stack5 --network osticket_net --restart always -p 8085:80 \
   -e MYSQL_HOST=osticket_db \
   -e MYSQL_USER=osticket \
   -e MYSQL_PASSWORD=osticket_pass \
   -e MYSQL_DB=osticket \
   osticket/osticket:latest
 
-# --- СТЭК 6: Docker + Apache2 + PHP + Landing (index.php на flashmemory) ---
-echo "-> Настройка Стэка 6 (Landing на flashmemory)..."
-mkdir -p "${FLASH_MEMORY_MOUNT}"
-cat << 'EOF' > "${FLASH_MEMORY_MOUNT}/index.php"
-<?php
-echo "<h1>Welcome to the Landing Page running from Flash Memory!</h1>";
-?>
-EOF
-chcon -Rt svirt_sandbox_file_t "${FLASH_MEMORY_MOUNT}" 2>/dev/null || true
-
-docker run -d --name landing_stack6 \
-  --restart always \
-  -p 8086:80 \
-  -v "${FLASH_MEMORY_MOUNT}:/var/www/html/:z" \
-  php:apache
+# --- СТЭК 6: Docker + Apache2 + PHP + Landing (на flashmemory) ---
+echo "-> Развертывание Стэка 6: Landing на flashmemory..."
+echo "<?php echo '<h1>Welcome to the Landing Page running from Flash Memory!</h1>'; ?>" > "${FLASH_MEMORY_MOUNT}/index.php"
+docker run -d --name landing_stack6 --restart always -p 8086:80 -v "${FLASH_MEMORY_MOUNT}:/var/www/html/:z" php:apache
 
 # --- СТЭК 7: Docker + Apache2 + PHP + Joomla ---
-echo "-> Настройка Стэка 7 (Joomla)..."
-docker run -d --name joomla_db \
-  --restart always \
-  -e MYSQL_ROOT_PASSWORD=joomla_root_pass \
-  -e MYSQL_DATABASE=joomla \
-  -e MYSQL_USER=joomla \
-  -e MYSQL_PASSWORD=joomla_pass \
-  mysql:5.7
+echo "-> Развертывание Стэка 7: Joomla..."
+docker run -d --name joomla_db --restart always -e MYSQL_ROOT_PASSWORD=joomla_root_pass -e MYSQL_DATABASE=joomla -e MYSQL_USER=joomla -e MYSQL_PASSWORD=joomla_pass mysql:5.7
+docker run -d --name joomla_stack7 --restart always -p 8087:80 --link joomla_db:joomla_db -e JOOMLA_DB_HOST=joomla_db -e JOOMLA_DB_USER=joomla -e JOOMLA_DB_PASSWORD=joomla_pass -e JOOMLA_DB_NAME=joomla joomla:latest
 
-docker run -d --name joomla_stack7 \
-  --restart always \
-  -p 8087:80 \
-  --link joomla_db:joomla_db \
-  -e JOOMLA_DB_HOST=joomla_db \
-  -e JOOMLA_DB_USER=joomla \
-  -e JOOMLA_DB_PASSWORD=joomla_pass \
-  -e JOOMLA_DB_NAME=joomla \
-  joomla:latest
+
+# ==============================================================================
+# ДОБАВЛЕННЫЕ ФРЕЙМВОРКИ ИЗ ИНФОРМАЦИОННОГО ЛИСТКА (Порты для Стола #1)
+# ==============================================================================
+
+# --- DJANGO ---
+echo "-> Развертывание DJANGO..."
+cd /opt
+pip3 install virtualenv
+virtualenv env
+source env/bin/activate
+pip3 install django
+django-admin startproject testsite || true
+cd testsite
+python3 manage.py migrate
+sed -i "s/ALLOWED_HOSTS = \\[\\]/ALLOWED_HOSTS = \\['*'\\]/g" testsite/settings.py
+nohup python3 manage.py runserver 0.0.0.0:8001 > /var/log/django.log 2>&1 &
+deactivate
+
+# --- LARAVEL ---
+echo "-> Развертывание LARAVEL..."
+cd /opt
+composer create-project laravel/laravel example --profile --no-interaction || true
+cd example
+# Так как порт 8081 занят Стэком 1, прокидываем на свободный близкий порт (например, 8089)
+nohup php artisan serve --host=0.0.0.0 --port=8089 > /var/log/laravel.log 2>&1 &
+
+# --- YII ---
+echo "-> Развертывание YII..."
+cd /opt
+composer create-project --prefer-dist yiisoft/yii2-app-basic basic --no-interaction || true
+cd basic
+nohup php yii serve 0.0.0.0 --port=8881 > /var/log/yii.log 2>&1 &
+
+# --- REACT (NODE) ---
+echo "-> Развертывание REACT..."
+cd /opt
+npx create-react-app demo-app --use-npm --yes || true
+cd demo-app
+export PORT=3001
+export BROWSER=none
+nohup npm start > /var/log/react.log 2>&1 &
+
+# --- VUE JS (NODE) ---
+echo "-> Развертывание VUE JS..."
+cd /opt
+npm create vue@latest -- --yes vue-project || true
+cd vue-project
+npm install --legacy-peer-deps || npm install
+nohup npm run dev -- --host 0.0.0.0 --port 5171 > /var/log/vue.log 2>&1 &
 
 echo "=========================================================="
-echo " ВСЕ СТЭКИ УСПЕШНО РАЗВЕРНУТЫ!"
-echo " Проверить запущенные контейнеры: docker ps"
+echo " ВСЕ СТЭКИ И ИНСТРУМЕНТЫ УСПЕШНО НАСТРОЕНЫ И ЗАПУЩЕНЫ!"
+echo " Проверить контейнеры: docker ps"
 echo "=========================================================="
