@@ -1,212 +1,137 @@
----
-- name: Configure Dev/Prod Stacks via Ansible (CentOS 7)
-  hosts: all
-  become: yes
-  vars:
-    web_root: "/var/www/html"
-    flash_memory_mount: "/mnt/flashmemory"
-    
-  tasks:
-    # --- НАСТРОЙКА DOCKER НА CENTOS 7 ---
-    - name: Install required system packages
-      yum:
-        name:
-          - yum-utils
-          - device-mapper-persistent-data
-          - lvm2
-        state: present
+#!/bin/bash
 
-    - name: Add Docker CE repository
-      get_url:
-        url: https://download.docker.com/linux/centos/docker-ce.repo
-        dest: /etc/yum.repos.d/docker-ce.repo
+# Скрипт автоматического развертывания 7 технологических стеков на CentOS 7
+# Запуск: sudo bash deploy_stacks.sh
 
-    - name: Install Docker CE and Python dependencies
-      yum:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-          - python3-pip
-        state: present
-        update_cache: yes
+# Завершать выполнение при любой ошибке
+set -e
 
-    - name: Install Docker module for Python via pip
-      pip:
-        name: docker
-        executable: pip3
+echo "=== [1/3] Обновление системы и установка зависимостей Docker ==="
+yum install -y yum-utils device-mapper-persistent-data lvm2
 
-    - name: Ensure Docker service is running and enabled
-      service:
-        name: docker
-        state: started
-        enabled: yes
+echo "=== [2/3] Подключение официального репозитория Docker CE и его установка ==="
+yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+yum install -y docker-ce docker-ce-cli containerd.io
 
-    # --- СТЭК 1: Docker + Apache2 + HTML (HELLO WORLD) ---
-    - name: Stack 1 - Create HTML Directory
-      file:
-        path: "{{ web_root }}/stack1"
-        state: directory
-        mode: '0755'
+echo "=== [3/3] Запуск и включение Docker в автозагрузку ==="
+systemctl start docker
+systemctl enable docker
 
-    - name: Stack 1 - Create Hello World index.html
-      copy:
-        content: "<h1>HELLO WORLD</h1>"
-        dest: "{{ web_root }}/stack1/index.html"
+# Переменные путей
+WEB_ROOT="/var/www/html"
+FLASH_MEMORY_MOUNT="/mnt/flashmemory"
 
-    - name: Stack 1 - Run Apache Docker Container
-      docker_container:
-        name: apache_stack1
-        image: httpd:latest
-        state: started
-        restart_policy: always
-        ports:
-          - "8081:80"
-        volumes:
-          - "{{ web_root }}/stack1:/usr/local/apache2/htdocs/"
+echo "=== Развертывание технологических стеков ==="
 
-    # --- СТЭК 2: Docker + Apache2 + PHP + phpinfo() ---
-    - name: Stack 2 - Create PHP Directory
-      file:
-        path: "{{ web_root }}/stack2"
-        state: directory
-        mode: '0755'
+# --- СТЭК 1: Docker + Apache2 + HTML (HELLO WORLD) ---
+echo "-> Настройка Стэка 1..."
+mkdir -p "${WEB_ROOT}/stack1"
+echo "<h1>HELLO WORLD</h1>" > "${WEB_ROOT}/stack1/index.html"
+# chcon нужен для SELinux на CentOS 7, чтобы контейнер имел доступ к папке
+chcon -Rt svirt_sandbox_file_t "${WEB_ROOT}/stack1" 2>/dev/null || true
 
-    - name: Stack 2 - Create index.php with phpinfo
-      copy:
-        content: "<?php phpinfo(); ?>"
-        dest: "{{ web_root }}/stack2/index.php"
+docker run -d --name apache_stack1 \
+  --restart always \
+  -p 8081:80 \
+  -v "${WEB_ROOT}/stack1:/usr/local/apache2/htdocs/:z" \
+  httpd:latest
 
-    - name: Stack 2 - Run Apache + PHP Docker Container
-      docker_container:
-        name: apache_php_stack2
-        image: php:apache
-        state: started
-        restart_policy: always
-        ports:
-          - "8082:80"
-        volumes:
-          - "{{ web_root }}/stack2:/var/www/html/"
+# --- СТЭК 2: Docker + Apache2 + PHP + phpinfo() ---
+echo "-> Настройка Стэка 2..."
+mkdir -p "${WEB_ROOT}/stack2"
+echo "<?php phpinfo(); ?>" > "${WEB_ROOT}/stack2/index.php"
+chcon -Rt svirt_sandbox_file_t "${WEB_ROOT}/stack2" 2>/dev/null || true
 
-    # --- СТЭК 3: Docker + Apache2 + PHP + Wordpress ---
-    - name: Stack 3 - Run WordPress Database Container
-      docker_container:
-        name: wordpress_db
-        image: mysql:5.7
-        state: started
-        restart_policy: always
-        env:
-          MYSQL_ROOT_PASSWORD: wp_root_password
-          MYSQL_DATABASE: wordpress
-          MYSQL_USER: wordpress
-          MYSQL_PASSWORD: wordpress_password
+docker run -d --name apache_php_stack2 \
+  --restart always \
+  -p 8082:80 \
+  -v "${WEB_ROOT}/stack2:/var/www/html/:z" \
+  php:apache
 
-    - name: Stack 3 - Run WordPress Container
-      docker_container:
-        name: wordpress_stack3
-        image: wordpress:latest
-        state: started
-        restart_policy: always
-        ports:
-          - "8083:80"
-        env:
-          WORDPRESS_DB_HOST: wordpress_db:3306
-          WORDPRESS_DB_USER: wordpress
-          WORDPRESS_DB_PASSWORD: wordpress_password
-          WORDPRESS_DB_NAME: wordpress
-        links:
-          - "wordpress_db:wordpress_db"
+# --- СТЭК 3: Docker + Apache2 + PHP + Wordpress ---
+echo "-> Настройка Стэка 3 (WordPress)..."
+docker run -d --name wordpress_db \
+  --restart always \
+  -e MYSQL_ROOT_PASSWORD=wp_root_password \
+  -e MYSQL_DATABASE=wordpress \
+  -e MYSQL_USER=wordpress \
+  -e MYSQL_PASSWORD=wordpress_password \
+  mysql:5.7
 
-    # --- СТЭК 4: Docker + Grafana ---
-    - name: Stack 4 - Run Grafana Container
-      docker_container:
-        name: grafana_stack4
-        image: grafana/grafana:latest
-        state: started
-        restart_policy: always
-        ports:
-          - "3000:3000"
+docker run -d --name wordpress_stack3 \
+  --restart always \
+  -p 8083:80 \
+  --link wordpress_db:wordpress_db \
+  -e WORDPRESS_DB_HOST=wordpress_db:3306 \
+  -e WORDPRESS_DB_USER=wordpress \
+  -e WORDPRESS_DB_PASSWORD=wordpress_password \
+  -e WORDPRESS_DB_NAME=wordpress \
+  wordpress:latest
 
-    # --- СТЭК 5: Docker + Apache2 + PHP + osTicket ---
-    - name: Stack 5 - Run osTicket Database Container
-      docker_container:
-        name: osticket_db
-        image: mysql:5.7
-        state: started
-        restart_policy: always
-        env:
-          MYSQL_ROOT_PASSWORD: osticket_root_pass
-          MYSQL_DATABASE: osticket
-          MYSQL_USER: osticket
-          MYSQL_PASSWORD: osticket_pass
+# --- СТЭК 4: Docker + Grafana ---
+echo "-> Настройка Стэка 4 (Grafana)..."
+docker run -d --name grafana_stack4 \
+  --restart always \
+  -p 3000:3000 \
+  grafana/grafana:latest
 
-    - name: Stack 5 - Run osTicket Container
-      docker_container:
-        name: osticket_stack5
-        image: osticket/osticket:latest
-        state: started
-        restart_policy: always
-        ports:
-          - "8085:80"
-        env:
-          MYSQL_HOST: osticket_db
-          MYSQL_USER: osticket
-          MYSQL_PASSWORD: osticket_pass
-          MYSQL_DB: osticket
-        links:
-          - "osticket_db:osticket_db"
+# --- СТЭК 5: Docker + Apache2 + PHP + osTicket ---
+echo "-> Настройка Стэка 5 (osTicket)..."
+docker run -d --name osticket_db \
+  --restart always \
+  -e MYSQL_ROOT_PASSWORD=osticket_root_pass \
+  -e MYSQL_DATABASE=osticket \
+  -e MYSQL_USER=osticket \
+  -e MYSQL_PASSWORD=osticket_pass \
+  mysql:5.7
 
-    # --- СТЭК 6: Docker + Apache2 + PHP + Landing (на flashmemory) ---
-    - name: Stack 6 - Ensure Flash Memory Mount Point Exists
-      file:
-        path: "{{ flash_memory_mount }}"
-        state: directory
-        mode: '0755'
+docker run -d --name osticket_stack5 \
+  --restart always \
+  -p 8085:80 \
+  --link osticket_db:osticket_db \
+  -e MYSQL_HOST=osticket_db \
+  -e MYSQL_USER=osticket \
+  -e MYSQL_PASSWORD=osticket_pass \
+  -e MYSQL_DB=osticket \
+  osticket/osticket:latest
 
-    - name: Stack 6 - Create Landing Page index.php on flashmemory
-      copy:
-        content: |
-          <?php
-          echo "<h1>Welcome to the Landing Page running from Flash Memory!</h1>";
-          ?>
-        dest: "{{ flash_memory_mount }}/index.php"
+# --- СТЭК 6: Docker + Apache2 + PHP + Landing (index.php на flashmemory) ---
+echo "-> Настройка Стэка 6 (Landing на flashmemory)..."
+mkdir -p "${FLASH_MEMORY_MOUNT}"
+cat << 'EOF' > "${FLASH_MEMORY_MOUNT}/index.php"
+<?php
+echo "<h1>Welcome to the Landing Page running from Flash Memory!</h1>";
+?>
+EOF
+chcon -Rt svirt_sandbox_file_t "${FLASH_MEMORY_MOUNT}" 2>/dev/null || true
 
-    - name: Stack 6 - Run Apache + PHP Landing Container
-      docker_container:
-        name: landing_stack6
-        image: php:apache
-        state: started
-        restart_policy: always
-        ports:
-          - "8086:80"
-        volumes:
-          - "{{ flash_memory_mount }}:/var/www/html/"
+docker run -d --name landing_stack6 \
+  --restart always \
+  -p 8086:80 \
+  -v "${FLASH_MEMORY_MOUNT}:/var/www/html/:z" \
+  php:apache
 
-    # --- СТЭК 7: Docker + Apache2 + PHP + Joomla ---
-    - name: Stack 7 - Run Joomla Database Container
-      docker_container:
-        name: joomla_db
-        image: mysql:5.7
-        state: started
-        restart_policy: always
-        env:
-          MYSQL_ROOT_PASSWORD: joomla_root_pass
-          MYSQL_DATABASE: joomla
-          MYSQL_USER: joomla
-          MYSQL_PASSWORD: joomla_pass
+# --- СТЭК 7: Docker + Apache2 + PHP + Joomla ---
+echo "-> Настройка Стэка 7 (Joomla)..."
+docker run -d --name joomla_db \
+  --restart always \
+  -e MYSQL_ROOT_PASSWORD=joomla_root_pass \
+  -e MYSQL_DATABASE=joomla \
+  -e MYSQL_USER=joomla \
+  -e MYSQL_PASSWORD=joomla_pass \
+  mysql:5.7
 
-    - name: Stack 7 - Run Joomla Container
-      docker_container:
-        name: joomla_stack7
-        image: joomla:latest
-        state: started
-        restart_policy: always
-        ports:
-          - "8087:80"
-        env:
-          JOOMLA_DB_HOST: joomla_db
-          JOOMLA_DB_USER: joomla
-          JOOMLA_DB_PASSWORD: joomla_pass
-          JOOMLA_DB_NAME: joomla
-        links:
-          - "joomla_db:joomla_db"
+docker run -d --name joomla_stack7 \
+  --restart always \
+  -p 8087:80 \
+  --link joomla_db:joomla_db \
+  -e JOOMLA_DB_HOST=joomla_db \
+  -e JOOMLA_DB_USER=joomla \
+  -e JOOMLA_DB_PASSWORD=joomla_pass \
+  -e JOOMLA_DB_NAME=joomla \
+  joomla:latest
+
+echo "=========================================================="
+echo " ВСЕ СТЭКИ УСПЕШНО РАЗВЕРНУТЫ!"
+echo " Проверить запущенные контейнеры: docker ps"
+echo "=========================================================="
