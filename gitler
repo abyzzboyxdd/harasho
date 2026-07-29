@@ -101,10 +101,39 @@ cat << 'EOF' > /opt/ansible_stacks/playbook.yml
       shell: docker run -d --name s4_grafana -p 8004:3000 --restart unless-stopped grafana/grafana:latest
       ignore_errors: yes
 
-    # Стек 5: osTicket -> Port 8005
-    - name: Stack 5 - MariaDB for osTicket
-      shell: docker run -d --name ost_db -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=osticket mariadb:10.5
-      ignore_errors: yes
+  # Стек 5: osTicket -> Port 8005
+- name: Ensure osTicket docker network exists
+  community.docker.docker_network:
+    name: osticket_net
+    state: present
+
+- name: Stack 5 - MariaDB for osTicket
+  community.docker.docker_container:
+    name: ost_db
+    image: mariadb:10.5
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: osticket_net
+    env:
+      MYSQL_ROOT_PASSWORD: "secret"
+      MYSQL_DATABASE: "osticket"
+
+- name: Stack 5 - osTicket Container
+  community.docker.docker_container:
+    name: s5_osticket
+    image: osticket/osticket:latest
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: osticket_net
+    ports:
+      - "8005:80"
+    env:
+      MYSQL_HOST: "ost_db"
+      MYSQL_DATABASE: "osticket"
+      MYSQL_USER: "root"
+      MYSQL_PASSWORD: "secret"
 
     - name: Stack 5 - osTicket Container
       shell: docker run -d --name s5_osticket --link ost_db:mysql -p 8005:80 --restart unless-stopped osticket/osticket:latest
